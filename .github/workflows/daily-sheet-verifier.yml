@@ -9,10 +9,10 @@ jobs:
   run-verifier:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository (feature/intial-setups)
+      - name: Checkout repository (develop)
         uses: actions/checkout@v4
         with:
-          ref: feature/intial-setups
+          ref: develop
 
       - name: Set up Python
         uses: actions/setup-python@v5
