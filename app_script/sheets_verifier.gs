@@ -38,7 +38,9 @@
  * ADVANCED CONFIGURATION - Script Properties
  * ============================================================================
  * Required Script Properties:
- * - MAIN_SPREADSHEET_ID: The main spreadsheet ID containing all engineer sheets
+ * - CONFIG_FILE_ID: (Optional) ID of timesheet_config.json file in Google Drive
+ * - DESTINATION_FOLDER_ID: (Optional) Folder ID where timesheet_config.json is stored
+ * - MAIN_SPREADSHEET_ID: (Fallback) The main spreadsheet ID - used if config file not found
  * - ENGINEER_NAMES: Comma-separated list of engineer names (sheet names)
  * - GOOGLE_CHAT_WEBHOOK_URL: Webhook URL for manager reports
  * - EMPLOYEE_ALERT_WEBHOOK_URL: Webhook URL for employee reminders
@@ -51,6 +53,10 @@
  * - BACKLOG_API_KEY: Backlog API key for authentication
  * - BACKLOG_PROJECT_IDS: Comma-separated list of project IDs to fetch issues from
  * - BACKLOG_ENGINEER_MAPPING: JSON object mapping engineer names to Backlog assignee names
+ *
+ * Note: The script automatically fetches the spreadsheet ID from timesheet_config.json
+ * based on the current year-month (format: "2025-December"). If the config file is not
+ * found or the current month's entry doesn't exist, it falls back to MAIN_SPREADSHEET_ID.
  * ============================================================================
  */
 
@@ -61,6 +67,149 @@ class SheetsVerifier {
   constructor() {
     this.props = PropertiesService.getScriptProperties();
     this.config = this._loadConfig();
+  }
+
+  /**
+   * Get current month name (helper for config lookup)
+   */
+  _getCurrentMonthName() {
+    const now = new Date();
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    return monthNames[now.getMonth()];
+  }
+
+  /**
+   * Get month name from a Date object
+   */
+  _getMonthNameFromDate(date) {
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    return monthNames[date.getMonth()];
+  }
+_getCurrentMonthSpreadsheetId() {
+  try {
+    // Delegate to the existing function which accepts an optional date
+    return this._getSpreadsheetIdForDate(new Date());
+  } catch (e) {
+    Logger.log("Error in _getCurrentMonthSpreadsheetId: " + e);
+    return null;
+  }
+}
+  /**
+   * Fetch spreadsheet ID from timesheet_config.json based on a specific date's year-month
+   * Returns the sheet ID for the specified date's month or null if not found
+   * @param {Date} targetDate - Optional date to get sheet ID for (defaults to current date)
+   */
+  _getSpreadsheetIdForDate(targetDate = null) {
+    try {
+      const props = PropertiesService.getScriptProperties();
+      const configFileId = props.getProperty("CONFIG_FILE_ID");
+      const destinationFolderId = props.getProperty("DESTINATION_FOLDER_ID");
+
+      if (!configFileId && !destinationFolderId) {
+        Logger.log("CONFIG_FILE_ID or DESTINATION_FOLDER_ID not configured");
+        return null;
+      }
+
+      // Try to get config file by ID first
+      let configFile = null;
+      if (configFileId) {
+        try {
+          configFile = DriveApp.getFileById(configFileId);
+        } catch (e) {
+          Logger.log("Could not find config file by ID, trying by name");
+        }
+      }
+
+      // If not found by ID, try to find by name in folder
+      if (!configFile && destinationFolderId) {
+        try {
+          const folder = DriveApp.getFolderById(destinationFolderId);
+          const files = folder.getFilesByName("timesheet_config.json");
+          if (files.hasNext()) {
+            configFile = files.next();
+          }
+        } catch (e) {
+          Logger.log("Could not find config file in folder");
+        }
+      }
+
+      // If still not found, try root folder
+      if (!configFile) {
+        try {
+          const files = DriveApp.getRootFolder().getFilesByName(
+            "timesheet_config.json"
+          );
+          if (files.hasNext()) {
+            configFile = files.next();
+          }
+        } catch (e) {
+          Logger.log("Could not find config file in root folder");
+        }
+      }
+
+      if (!configFile) {
+        Logger.log("timesheet_config.json not found");
+        return null;
+      }
+
+      // Read and parse config file
+      const configContent = configFile.getBlob().getDataAsString();
+      const config = JSON.parse(configContent);
+
+      // Use targetDate if provided, otherwise use current date
+      const dateToUse = targetDate || new Date();
+      const targetYear = dateToUse.getFullYear();
+      const targetMonth = this._getMonthNameFromDate(dateToUse);
+      const configKey = targetYear + "-" + targetMonth;
+
+      // Get spreadsheet ID for target month
+      const spreadsheetId = config[configKey];
+
+      if (spreadsheetId) {
+        Logger.log(
+          "✓ Found spreadsheet ID for " + configKey + ": " + spreadsheetId
+        );
+        return spreadsheetId;
+      } else {
+        Logger.log("No spreadsheet ID found for " + configKey);
+        const availableKeys = Object.keys(config).filter(
+          (k) => k !== "updated_at" && k !== "latest"
+        );
+        if (availableKeys.length > 0) {
+          Logger.log("Available keys: " + availableKeys.join(", "));
+        }
+        return null;
+      }
+    } catch (e) {
+      Logger.log("Error fetching spreadsheet ID from config: " + e);
+      return null;
+    }
   }
 
   /**
@@ -95,15 +244,19 @@ class SheetsVerifier {
       } else {
         // Default holidays for 2025
         holidays = [
-          "2025-04-10",
-          "2025-05-01",
-          "2025-08-03",
-          "2025-08-15",
-          "2025-09-14",
-          "2025-10-01",
-          "2025-10-02",
-          "2025-10-20",
-          "2025-12-25",
+            "2026-01-01",
+            "2026-01-26",
+            "2026-03-20",
+            "2026-04-03",
+            "2026-04-15",
+            "2026-05-01",
+            "2026-08-15",
+            "2026-08-25",
+            "2026-08-26",
+            "2026-09-04",
+            "2026-10-02",
+            "2026-10-20",
+            "2026-12-25"
         ];
       }
     } catch (e) {
@@ -121,8 +274,20 @@ class SheetsVerifier {
       Logger.log("Error parsing BACKLOG_ENGINEER_MAPPING: " + e);
     }
 
+    // Get spreadsheet ID for current month from config file
+    // Fallback to MAIN_SPREADSHEET_ID if config file not available
+    let mainSpreadsheetId = this._getCurrentMonthSpreadsheetId();
+    if (!mainSpreadsheetId) {
+      mainSpreadsheetId = props.getProperty("MAIN_SPREADSHEET_ID");
+      if (mainSpreadsheetId) {
+        Logger.log(
+          "Using MAIN_SPREADSHEET_ID from Script Properties as fallback"
+        );
+      }
+    }
+
     return {
-      mainSpreadsheetId: props.getProperty("MAIN_SPREADSHEET_ID"),
+      mainSpreadsheetId: mainSpreadsheetId,
       engineerNames: engineerNames,
       googleChatWebhookUrl: props.getProperty("GOOGLE_CHAT_WEBHOOK_URL"),
       employeeAlertWebhookUrl: props.getProperty("EMPLOYEE_ALERT_WEBHOOK_URL"),
@@ -182,6 +347,7 @@ class SheetsVerifier {
 
   /**
    * Get the last working day (excluding weekends and holidays)
+   * Returns an object with both the formatted date string and the Date object
    */
   getLastWorkingDay() {
     const today = new Date();
@@ -205,11 +371,14 @@ class SheetsVerifier {
       checkDate.setDate(checkDate.getDate() - 1);
     }
 
-    return Utilities.formatDate(
-      checkDate,
-      Session.getScriptTimeZone(),
-      "d-MMM"
-    );
+    return {
+      dateString: Utilities.formatDate(
+        checkDate,
+        Session.getScriptTimeZone(),
+        "d-MMM"
+      ),
+      dateObject: checkDate,
+    };
   }
 
   /**
@@ -255,12 +424,16 @@ class SheetsVerifier {
 
   /**
    * Get engineer sheet data
+   * @param {string} engineerName - Name of the engineer (sheet name)
+   * @param {string} monthName - Month name (e.g., "December") - for logging purposes
+   * @param {string} spreadsheetId - Optional spreadsheet ID (defaults to config.mainSpreadsheetId)
    */
-  getEngineerSheetData(engineerName, currentMonth) {
+  getEngineerSheetData(engineerName, monthName, spreadsheetId = null) {
     const sheetRange = engineerName + "!" + this.config.sheetDataRange;
+    const targetSpreadsheetId = spreadsheetId || this.config.mainSpreadsheetId;
 
     try {
-      return this.getSheetData(this.config.mainSpreadsheetId, sheetRange);
+      return this.getSheetData(targetSpreadsheetId, sheetRange);
     } catch (e) {
       Logger.log("Error fetching data for engineer " + engineerName + ": " + e);
       return [];
@@ -847,19 +1020,55 @@ class SheetsVerifier {
   verifyAllEmployees() {
     const results = [];
 
-    // Get current month and last working day
-    const currentMonth = this.getCurrentMonthSheetName();
-    const lastWorkingDay = this.getLastWorkingDay();
+    // Get last working day (returns object with dateString and dateObject)
+    const lastWorkingDayInfo = this.getLastWorkingDay();
+    if (!lastWorkingDayInfo) {
+      Logger.log("No last working day found");
+      return results;
+    }
+
+    const lastWorkingDay = lastWorkingDayInfo.dateString;
+    const lastWorkingDayDate = lastWorkingDayInfo.dateObject;
+
+    // Get the month of the last working day (not current month!)
+    const lastWorkingDayMonth = this._getMonthNameFromDate(lastWorkingDayDate);
+    const lastWorkingDayYear = lastWorkingDayDate.getFullYear();
+
+    // Fetch spreadsheet ID for the last working day's month
+    const spreadsheetId = this._getSpreadsheetIdForDate(lastWorkingDayDate);
+    if (!spreadsheetId) {
+      Logger.log(
+        "Warning: Could not find spreadsheet ID for " +
+          lastWorkingDayYear +
+          "-" +
+          lastWorkingDayMonth +
+          ", using fallback"
+      );
+      // Use fallback from config
+    }
+
+    const effectiveSpreadsheetId =
+      spreadsheetId || this.config.mainSpreadsheetId;
 
     Logger.log("Checking entries for working day: " + lastWorkingDay);
-    Logger.log("Using main spreadsheet ID: " + this.config.mainSpreadsheetId);
+    Logger.log(
+      "Last working day is in month: " +
+        lastWorkingDayMonth +
+        " " +
+        lastWorkingDayYear
+    );
+    Logger.log("Using spreadsheet ID: " + effectiveSpreadsheetId);
 
     for (let i = 0; i < this.config.engineerNames.length; i++) {
       const engineerName = this.config.engineerNames[i];
       Logger.log("Checking " + engineerName + "'s sheet...");
 
-      // Get sheet data from the engineer's sheet within the main spreadsheet
-      const sheetData = this.getEngineerSheetData(engineerName, currentMonth);
+      // Get sheet data from the engineer's sheet within the spreadsheet for last working day's month
+      const sheetData = this.getEngineerSheetData(
+        engineerName,
+        lastWorkingDayMonth,
+        effectiveSpreadsheetId
+      );
 
       // Parse last working day entries
       const lastDayEntries = this.parseLastWorkingDayEntries(
@@ -1153,13 +1362,14 @@ class SheetsVerifier {
     );
 
     // Check if we should run verification today
-    const lastWorkingDay = this.getLastWorkingDay();
-    if (!lastWorkingDay) {
+    const lastWorkingDayInfo = this.getLastWorkingDay();
+    if (!lastWorkingDayInfo) {
       Logger.log(
         "No verification needed - today is weekend or no valid working day to check"
       );
       return [];
     }
+    const lastWorkingDay = lastWorkingDayInfo.dateString;
 
     // Verify all employee sheets
     const results = this.verifyAllEmployees();
@@ -1703,9 +1913,34 @@ function viewConfiguration() {
   // Main settings
   Logger.log("\nMain Settings:");
   Logger.log(
-    "  MAIN_SPREADSHEET_ID: " +
+    "  CONFIG_FILE_ID: " + (props.getProperty("CONFIG_FILE_ID") || "NOT SET")
+  );
+  Logger.log(
+    "  DESTINATION_FOLDER_ID: " +
+      (props.getProperty("DESTINATION_FOLDER_ID") || "NOT SET")
+  );
+  Logger.log(
+    "  MAIN_SPREADSHEET_ID (fallback): " +
       (props.getProperty("MAIN_SPREADSHEET_ID") || "NOT SET")
   );
+
+  // Show which spreadsheet ID is actually being used
+  try {
+    const verifier = new SheetsVerifier();
+    const currentSpreadsheetId = verifier.config.mainSpreadsheetId;
+    if (currentSpreadsheetId) {
+      Logger.log(
+        "  ✓ Current Spreadsheet ID (from config file): " + currentSpreadsheetId
+      );
+    } else {
+      Logger.log(
+        "  ⚠ No spreadsheet ID found (check config file or MAIN_SPREADSHEET_ID)"
+      );
+    }
+  } catch (e) {
+    Logger.log("  ⚠ Could not determine current spreadsheet ID: " + e);
+  }
+
   Logger.log(
     "  GOOGLE_CHAT_WEBHOOK_URL: " +
       (props.getProperty("GOOGLE_CHAT_WEBHOOK_URL") ? "SET" : "NOT SET")
@@ -1906,7 +2141,11 @@ function setupConfiguration() {
   const props = PropertiesService.getScriptProperties();
 
   // Set your configuration values here
-  props.setProperty("MAIN_SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE");
+  // Note: The script will automatically fetch spreadsheet ID from timesheet_config.json
+  // based on current year-month. Set these only if you want to use a fallback:
+  props.setProperty("MAIN_SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE"); // Fallback only
+  props.setProperty("CONFIG_FILE_ID", ""); // Optional: ID of timesheet_config.json file
+  props.setProperty("DESTINATION_FOLDER_ID", ""); // Optional: Folder ID where config file is stored
   props.setProperty("GOOGLE_CHAT_WEBHOOK_URL", "YOUR_WEBHOOK_URL");
   props.setProperty("EMPLOYEE_ALERT_WEBHOOK_URL", "YOUR_ALERT_WEBHOOK_URL");
   props.setProperty("TEST_MODE", "false");
