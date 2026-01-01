@@ -1,3 +1,6 @@
+// Language: javascript
+// File: `app_script/timesheet_creator.gs`
+
 // Configuration
 const EMPLOYEES = [
   "Jinu T J",
@@ -25,20 +28,20 @@ const ACTIVITY_OPTIONS = [
 ];
 
 const HOLIDAY_DATES = [
-            "2026-01-01",
-            "2026-01-26",
-            "2026-03-20",
-            "2026-04-03",
-            "2026-04-15",
-            "2026-05-01",
-            "2026-08-15",
-            "2026-08-25",
-            "2026-08-26",
-            "2026-09-04",
-            "2026-10-02",
-            "2026-10-20",
-            "2026-12-25"
-        ];
+  "2026-01-01",
+  "2026-01-26",
+  "2026-03-20",
+  "2026-04-03",
+  "2026-04-15",
+  "2026-05-01",
+  "2026-08-15",
+  "2026-08-25",
+  "2026-08-26",
+  "2026-09-04",
+  "2026-10-02",
+  "2026-10-20",
+  "2026-12-25"
+];
 
 // Colors
 const HEADER_BG = "#FEF2CB"; // Light yellow
@@ -131,6 +134,10 @@ function createMonthlyTimesheet(monthName = null, year = null, testMode = false)
     return url;
   }
 
+  // Create the actual spreadsheet (non-test)
+  const ss = SpreadsheetApp.create(workbookName);
+  Logger.log("Created spreadsheet id: " + ss.getId());
+
   // Move to destination folder if specified
   const file = DriveApp.getFileById(ss.getId());
   if (DESTINATION_FOLDER_ID) {
@@ -164,7 +171,6 @@ function createMonthlyTimesheet(monthName = null, year = null, testMode = false)
   }
 
   // Get dates for the month
-  // const dates = getDatesForMonth(monthName, year); // already obtained above
   Logger.log("Generated " + dates.length + " dates");
 
   // Delete default "Sheet1"
@@ -300,6 +306,7 @@ function getDatesForMonth(monthName, year) {
     Feb: 1,
     Mar: 2,
     Apr: 3,
+    May: 4,
     Jun: 5,
     Jul: 6,
     Aug: 7,
