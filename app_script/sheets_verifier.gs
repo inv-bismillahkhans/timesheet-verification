@@ -1252,22 +1252,27 @@ _getCurrentMonthSpreadsheetId() {
 
   /**
    * Count open Backlog tickets per engineer
-   * Returns object mapping engineer names to ticket counts
+   * Returns object mapping engineer names to array of issue objects {issueKey, dueDate, summary}
    */
   _countBacklogTicketsPerEngineer() {
     const issues = this._fetchBacklogIssues();
-    const ticketCounts = {};
+    const ticketsByEngineer = {};
 
-    // Initialize all engineers with 0
+    // Initialize all engineers with empty arrays
     for (let i = 0; i < this.config.engineerNames.length; i++) {
-      ticketCounts[this.config.engineerNames[i]] = 0;
+      ticketsByEngineer[this.config.engineerNames[i]] = [];
     }
 
-    // Count tickets per assignee
+    // Collect tickets per assignee
     for (let i = 0; i < issues.length; i++) {
       const issue = issues[i];
       if (issue.assignee && issue.assignee.name) {
         const assigneeName = issue.assignee.name;
+        const issueData = {
+          issueKey: issue.issueKey,
+          dueDate: issue.dueDate || null,
+          summary: issue.summary || "",
+        };
 
         // Check if this assignee matches any engineer (direct match or via mapping)
         for (let j = 0; j < this.config.engineerNames.length; j++) {
@@ -1275,14 +1280,14 @@ _getCurrentMonthSpreadsheetId() {
 
           // Direct name match
           if (assigneeName === engineerName) {
-            ticketCounts[engineerName] = (ticketCounts[engineerName] || 0) + 1;
+            ticketsByEngineer[engineerName].push(issueData);
             break;
           }
 
           // Check mapping (engineer name -> Backlog assignee name)
           const mappedName = this.config.backlogEngineerMapping[engineerName];
           if (mappedName && assigneeName === mappedName) {
-            ticketCounts[engineerName] = (ticketCounts[engineerName] || 0) + 1;
+            ticketsByEngineer[engineerName].push(issueData);
             break;
           }
 
@@ -1293,53 +1298,117 @@ _getCurrentMonthSpreadsheetId() {
             engineerName.toLowerCase().indexOf(assigneeName.toLowerCase()) !==
               -1
           ) {
-            ticketCounts[engineerName] = (ticketCounts[engineerName] || 0) + 1;
+            ticketsByEngineer[engineerName].push(issueData);
             break;
           }
         }
       }
     }
 
-    return ticketCounts;
+    return ticketsByEngineer;
+  }
+
+  /**
+   * Get due date icon based on urgency
+   * Returns object with icon and isUrgent flag
+   * 🔥 = overdue, 🚨 = due today, ⏰ = due tomorrow
+   */
+  _getDueDateIcon(dueDate) {
+    if (!dueDate) {
+      return { icon: "", isUrgent: false };
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const dueDateObj = new Date(dueDate);
+    dueDateObj.setHours(0, 0, 0, 0);
+
+    if (dueDateObj < today) {
+      return { icon: "🔥", isUrgent: true }; // Overdue
+    } else if (dueDateObj.getTime() === today.getTime()) {
+      return { icon: "🚨", isUrgent: true }; // Due today
+    } else if (dueDateObj.getTime() === tomorrow.getTime()) {
+      return { icon: "⏰", isUrgent: true }; // Due tomorrow
+    }
+
+    return { icon: "", isUrgent: false };
+  }
+
+  /**
+   * Truncate summary to first N words
+   */
+  _truncateSummary(summary, wordCount) {
+    if (!summary) {
+      return "No summary";
+    }
+    const words = summary.trim().split(/\s+/);
+    if (words.length <= wordCount) {
+      return summary;
+    }
+    return words.slice(0, wordCount).join(" ") + "...";
   }
 
   /**
    * Format Backlog ticket counts for display
+   * Shows total count but only lists urgent tickets (overdue, due today, due tomorrow)
+   * @param {Object} ticketsByEngineer - Object mapping engineer names to arrays of issue objects
    */
-  _formatBacklogTicketCounts(ticketCounts) {
-    let message = "\n📋 *Open Backlog Tickets*\n\n";
-
-    // Calculate width based on longest name for alignment
-    let maxNameLength = 0;
-    for (let i = 0; i < this.config.engineerNames.length; i++) {
-      const nameLength = this.config.engineerNames[i].length;
-      if (nameLength > maxNameLength) {
-        maxNameLength = nameLength;
-      }
-    }
+  _formatBacklogTicketCounts(ticketsByEngineer) {
+    let message = "\n📋 *Backlog Tickets*\n\n";
+    const backlogUrl = this.config.backlogUrl.replace(/\/$/, ""); // Remove trailing slash
 
     // Build clean, professional list format
     let hasTickets = false;
     for (let i = 0; i < this.config.engineerNames.length; i++) {
       const engineerName = this.config.engineerNames[i];
-      const count = ticketCounts[engineerName] || 0;
+      const issues = ticketsByEngineer[engineerName] || [];
+      const totalCount = issues.length;
 
-      if (count > 0) {
+      // Filter only urgent tickets (overdue, today, tomorrow)
+      const urgentIssues = [];
+      for (let j = 0; j < issues.length; j++) {
+        const issueData = issues[j];
+        const dueDateInfo = this._getDueDateIcon(issueData.dueDate);
+        if (dueDateInfo.isUrgent) {
+          urgentIssues.push({
+            issueKey: issueData.issueKey,
+            summary: issueData.summary,
+            icon: dueDateInfo.icon,
+          });
+        }
+      }
+
+      if (totalCount > 0) {
         hasTickets = true;
-        // Pad name for alignment, then show count with formatting
-        const padding = " ".repeat(
-          Math.max(0, maxNameLength - engineerName.length + 2)
-        );
-        message +=
-          "• *" +
-          engineerName +
-          "*" +
-          padding +
-          "`" +
-          count +
-          "` open ticket" +
-          (count > 1 ? "s" : "") +
-          "\n";
+
+        // Build issue links with due date icons and truncated summary (only urgent)
+        const issueLinks = [];
+        for (let j = 0; j < urgentIssues.length; j++) {
+          const issue = urgentIssues[j];
+          const issueUrl = backlogUrl + "/view/" + issue.issueKey;
+          const truncatedSummary = this._truncateSummary(issue.summary, 3);
+          issueLinks.push(
+            "<" + issueUrl + "|" + truncatedSummary + ">" + issue.icon
+          );
+        }
+
+        // Show total count, but only list urgent tickets
+        if (urgentIssues.length > 0) {
+          message +=
+            "• *" +
+            engineerName +
+            "*  `" +
+            totalCount +
+            "` (" +
+            issueLinks.join(", ") +
+            ")\n";
+        } else {
+          message += "• *" + engineerName + "*  `" + totalCount + "`\n";
+        }
       }
     }
 
@@ -1585,13 +1654,13 @@ class CategorizedRSSFeedAggregator {
 
   getCurrentDayCategory() {
     const dayMapping = {
-      0: "monday",
-      1: "tuesday",
-      2: "wednesday",
-      3: "thursday",
-      4: "friday",
-      5: "monday",
-      6: "monday", // Weekend defaults to Monday
+      0: "monday", // Sunday defaults to Monday
+      1: "monday",
+      2: "tuesday",
+      3: "wednesday",
+      4: "thursday",
+      5: "friday",
+      6: "monday", // Saturday defaults to Monday
     };
     const currentDay = new Date().getDay();
     return dayMapping[currentDay];
