@@ -111,15 +111,15 @@ class SheetsVerifier {
     ];
     return monthNames[date.getMonth()];
   }
-_getCurrentMonthSpreadsheetId() {
-  try {
-    // Delegate to the existing function which accepts an optional date
-    return this._getSpreadsheetIdForDate(new Date());
-  } catch (e) {
-    Logger.log("Error in _getCurrentMonthSpreadsheetId: " + e);
-    return null;
+  _getCurrentMonthSpreadsheetId() {
+    try {
+      // Delegate to the existing function which accepts an optional date
+      return this._getSpreadsheetIdForDate(new Date());
+    } catch (e) {
+      Logger.log("Error in _getCurrentMonthSpreadsheetId: " + e);
+      return null;
+    }
   }
-}
   /**
    * Fetch spreadsheet ID from timesheet_config.json based on a specific date's year-month
    * Returns the sheet ID for the specified date's month or null if not found
@@ -244,19 +244,19 @@ _getCurrentMonthSpreadsheetId() {
       } else {
         // Default holidays for 2025
         holidays = [
-            "2026-01-01",
-            "2026-01-26",
-            "2026-03-20",
-            "2026-04-03",
-            "2026-04-15",
-            "2026-05-01",
-            "2026-08-15",
-            "2026-08-25",
-            "2026-08-26",
-            "2026-09-04",
-            "2026-10-02",
-            "2026-10-20",
-            "2026-12-25"
+          "2026-01-01",
+          "2026-01-26",
+          "2026-03-20",
+          "2026-04-03",
+          "2026-04-15",
+          "2026-05-01",
+          "2026-08-15",
+          "2026-08-25",
+          "2026-08-26",
+          "2026-09-04",
+          "2026-10-02",
+          "2026-10-20",
+          "2026-12-25",
         ];
       }
     } catch (e) {
@@ -1185,6 +1185,7 @@ _getCurrentMonthSpreadsheetId() {
 
   /**
    * Fetch open issues from Backlog API
+   * Also fetches resolved issues for Bug type tickets
    * Returns array of issues or empty array on error
    */
   _fetchBacklogIssues() {
@@ -1204,7 +1205,9 @@ _getCurrentMonthSpreadsheetId() {
         return [];
       }
 
-      // Build URL with query parameters
+      const allIssues = [];
+
+      // Fetch open and in-progress issues (status 1 = Open, 2 = In Progress)
       let url =
         this.config.backlogUrl +
         "/api/v2/issues?apiKey=" +
@@ -1219,7 +1222,7 @@ _getCurrentMonthSpreadsheetId() {
       url += "&statusId[]=1&statusId[]=2";
 
       Logger.log(
-        "Fetching Backlog issues from: " +
+        "Fetching open/in-progress Backlog issues from: " +
           url.replace(this.config.backlogApiKey, "***")
       );
 
@@ -1228,22 +1231,68 @@ _getCurrentMonthSpreadsheetId() {
         muteHttpExceptions: true,
       };
 
-      const response = UrlFetchApp.fetch(url, options);
-      const responseCode = response.getResponseCode();
+      let response = UrlFetchApp.fetch(url, options);
+      let responseCode = response.getResponseCode();
 
       if (responseCode === 200) {
         const issues = JSON.parse(response.getContentText());
-        Logger.log("✓ Fetched " + issues.length + " open issues from Backlog");
-        return issues;
+        Logger.log(
+          "✓ Fetched " + issues.length + " open/in-progress issues from Backlog"
+        );
+        for (let k = 0; k < issues.length; k++) {
+          allIssues.push(issues[k]);
+        }
       } else {
         Logger.log(
-          "Error fetching Backlog issues: " +
+          "Error fetching open Backlog issues: " +
             responseCode +
             " - " +
             response.getContentText()
         );
-        return [];
       }
+
+      // Also fetch resolved issues (status 3 = Resolved)
+      // These will be filtered to only include Bugs in the counting function
+      let resolvedUrl =
+        this.config.backlogUrl +
+        "/api/v2/issues?apiKey=" +
+        this.config.backlogApiKey;
+
+      // Add project IDs
+      for (let i = 0; i < projectIds.length; i++) {
+        resolvedUrl += "&projectId[]=" + encodeURIComponent(projectIds[i]);
+      }
+
+      // Add resolved status ID (3 = Resolved)
+      resolvedUrl += "&statusId[]=3";
+
+      Logger.log(
+        "Fetching resolved Backlog issues from: " +
+          resolvedUrl.replace(this.config.backlogApiKey, "***")
+      );
+
+      response = UrlFetchApp.fetch(resolvedUrl, options);
+      responseCode = response.getResponseCode();
+
+      if (responseCode === 200) {
+        const resolvedIssues = JSON.parse(response.getContentText());
+        Logger.log(
+          "✓ Fetched " + resolvedIssues.length + " resolved issues from Backlog"
+        );
+        for (let k = 0; k < resolvedIssues.length; k++) {
+          allIssues.push(resolvedIssues[k]);
+        }
+      } else {
+        Logger.log(
+          "Error fetching resolved Backlog issues: " +
+            responseCode +
+            " - " +
+            response.getContentText()
+        );
+      }
+
+      Logger.log("✓ Total issues fetched: " + allIssues.length);
+      return allIssues;
     } catch (e) {
       Logger.log("Error fetching Backlog issues: " + e);
       return [];
@@ -1252,7 +1301,8 @@ _getCurrentMonthSpreadsheetId() {
 
   /**
    * Count open Backlog tickets per engineer
-   * Returns object mapping engineer names to array of issue objects {issueKey, dueDate, summary}
+   * Includes all open/in-progress tickets and resolved Bug tickets
+   * Returns object mapping engineer names to array of issue objects {issueKey, dueDate, summary, issueType, status}
    */
   _countBacklogTicketsPerEngineer() {
     const issues = this._fetchBacklogIssues();
@@ -1268,10 +1318,28 @@ _getCurrentMonthSpreadsheetId() {
       const issue = issues[i];
       if (issue.assignee && issue.assignee.name) {
         const assigneeName = issue.assignee.name;
+
+        // Get issue type and status
+        const issueType = issue.issueType ? issue.issueType.name : "";
+        const statusId = issue.status ? issue.status.id : null;
+        const statusName = issue.status ? issue.status.name : "";
+
+        // For resolved tickets (status ID 3), only include if it's a Bug
+        // For open/in-progress tickets (status ID 1 or 2), include all types
+        const isResolved = statusId === 3;
+        const isBug = issueType && issueType.toLowerCase() === "bug";
+
+        if (isResolved && !isBug) {
+          // Skip resolved tickets that are not bugs
+          continue;
+        }
+
         const issueData = {
           issueKey: issue.issueKey,
           dueDate: issue.dueDate || null,
           summary: issue.summary || "",
+          issueType: issueType,
+          status: statusName,
         };
 
         // Check if this assignee matches any engineer (direct match or via mapping)
