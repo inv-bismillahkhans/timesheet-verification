@@ -108,7 +108,7 @@ function readTeamConfigurations() {
       statusOptions: findColumnIndex(headers, ["Status Options", "StatusOptions"]),
       activityOptions: findColumnIndex(headers, ["Activity Options", "ActivityOptions"]),
       holidayDates: findColumnIndex(headers, ["Holiday Dates", "HolidayDates", "Holidays"]),
-      enabled: findColumnIndex(headers, ["Enabled", "Active"])
+      enabled: findColumnIndex(headers, ["Enabled (Create)", "Enabled", "Active"])
     };
 
     // Validate required columns
@@ -719,18 +719,24 @@ function updateConfigJson(spreadsheetId, monthName, year, projectName, driveFold
         }
 
         merged[configKey] = spreadsheetId;
-        configFile.setContent(JSON.stringify(merged, null, 2));
+        const blob = Utilities.newBlob(JSON.stringify(merged, null, 2), 'text/plain', configFileName);
+        configFile.setContent(blob.getDataAsString());
         Logger.log("✓ Updated existing config file: " + configFile.getId());
+        Logger.log("Config file MIME type: " + configFile.getMimeType());
       } catch (e) {
         Logger.log("Warning: Could not parse existing config, overwriting");
-        configFile.setContent(JSON.stringify(newEntry, null, 2));
+        const blob = Utilities.newBlob(JSON.stringify(newEntry, null, 2), 'text/plain', configFileName);
+        configFile.setContent(blob.getDataAsString());
       }
     } else {
-      configFile = folder.createFile(configFileName, JSON.stringify(newEntry, null, 2), MimeType.PLAIN_TEXT);
+      // Create as blob to ensure plain text MIME type
+      const blob = Utilities.newBlob(JSON.stringify(newEntry, null, 2), 'text/plain', configFileName);
+      configFile = folder.createFile(blob);
       Logger.log("✓ Created new config file: " + configFile.getId());
     }
 
     Logger.log("Config file URL: " + configFile.getUrl());
+    Logger.log("Config file MIME type: " + configFile.getMimeType());
   } catch (err) {
     Logger.log("ERROR updating config file: " + err);
   }

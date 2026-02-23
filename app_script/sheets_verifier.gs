@@ -1,72 +1,83 @@
 /**
- * Google Apps Script version of sheets_verifier.py
- * Timesheet Verification System
+ * Google Apps Script - Timesheet Verification System
  *
- * This script verifies employee timesheet entries and sends daily reports
- *
- * ============================================================================
- * QUICK START - Simplified Configuration
- * ============================================================================
- *
- * 1. Set basic configuration:
- *    - Run setupConfiguration() and update the values
- *
- * 2. Configure engineers (EASY WAY):
- *
- *    Option A - Quick setup (recommended):
- *    quickSetupEngineers([
- *      {name: 'John Doe', chatId: '123456789012345678901'},
- *      {name: 'Jane Smith', chatId: '987654321098765432109'},
- *      {name: 'Bob Johnson'}  // No chat ID needed
- *    ]);
- *
- *    Option B - Add one at a time:
- *    addEngineer('John Doe', '123456789012345678901');
- *    addEngineer('Jane Smith', '987654321098765432109');
- *
- *    Option C - Just set names (chat IDs optional):
- *    setEngineerNames(['John Doe', 'Jane Smith', 'Bob Johnson']);
- *    setEngineerChatId('John Doe', '123456789012345678901');  // Add chat ID later
- *
- * 3. View your configuration:
- *    viewConfiguration();
- *
- * 4. Remove an engineer:
- *    removeEngineer('John Doe');
+ * This script verifies employee timesheet entries and sends daily reports.
+ * All team configuration lives in the master "Teams Config" sheet (same sheet
+ * used by the timesheet creator). The verifier reads it on every run.
  *
  * ============================================================================
- * ADVANCED CONFIGURATION - Script Properties
+ * QUICK START
  * ============================================================================
- * Required Script Properties:
- * - CONFIG_FILE_ID: (Optional) ID of timesheet_config.json file in Google Drive
- * - DESTINATION_FOLDER_ID: (Optional) Folder ID where timesheet_config.json is stored
- * - MAIN_SPREADSHEET_ID: (Fallback) The main spreadsheet ID - used if config file not found
- * - ENGINEER_NAMES: Comma-separated list of engineer names (sheet names)
- * - GOOGLE_CHAT_WEBHOOK_URL: Webhook URL for manager reports
- * - EMPLOYEE_ALERT_WEBHOOK_URL: Webhook URL for employee reminders
+ *
+ * 1. Set the master sheet ID:
+ *    setupMultiTeam('YOUR_MASTER_SHEET_ID');
+ *
+ * 2. Verify your config:
+ *    viewMultiTeamConfiguration();
+ *
+ * 3. Set your time-driven trigger to: runDailyVerification
+ *
+ * ============================================================================
+ * SCRIPT PROPERTIES
+ * ============================================================================
+ *
+ * Required:
+ * - MASTER_SHEET_ID: Spreadsheet ID of the master "Teams Config" sheet
+ *
+ * Optional (global, not team-specific):
  * - TEST_MODE: "true" or "false" (default: false)
- * - EMPLOYEE_CHAT_IDS: JSON object mapping employee names to chat IDs
- * - HOLIDAYS: JSON array of holiday dates in YYYY-MM-DD format
- * - ROWS_TO_CHECK_AFTER_DATE: Number of rows to check after finding a date (default: 5)
- * - RSS_ARTICLE_COUNT: Number of RSS articles to fetch and send (default: 5)
- * - BACKLOG_URL: Backlog service URL (default: "https://ilabs.backlog.com")
- * - BACKLOG_API_KEY: Backlog API key for authentication
- * - BACKLOG_PROJECT_IDS: Comma-separated list of project IDs to fetch issues from
- * - BACKLOG_ENGINEER_MAPPING: JSON object mapping engineer names to Backlog assignee names
+ * - ROWS_TO_CHECK_AFTER_DATE: Number of rows to check after date (default: 5)
+ * - SHEET_DATA_RANGE: Range to read per engineer sheet (default: "A1:K150")
+ * - RSS_ARTICLE_COUNT: Number of RSS articles to fetch (default: 5)
  *
- * Note: The script automatically fetches the spreadsheet ID from timesheet_config.json
- * based on the current year-month (format: "2025-December"). If the config file is not
- * found or the current month's entry doesn't exist, it falls back to MAIN_SPREADSHEET_ID.
+ * All other config (engineers, webhooks, holidays, Backlog settings) is read
+ * per-team from the master sheet columns. See create_test_master_sheet.gs for
+ * the full column layout.
  * ============================================================================
  */
 
 /**
  * Main class for Sheets Verification
+ * @param {Object} teamConfig - Team configuration object from master sheet (via readVerifierTeamConfigs())
  */
 class SheetsVerifier {
-  constructor() {
+  constructor(teamConfig) {
     this.props = PropertiesService.getScriptProperties();
-    this.config = this._loadConfig();
+    this._teamConfig = teamConfig;
+    this.config = this._loadConfigFromTeam(teamConfig);
+  }
+
+  /**
+   * Build this.config from a team configuration object (from master sheet).
+   * Global settings (rowsToCheckAfterDate, sheetDataRange, rssArticleCount, testMode)
+   * are still read from Script Properties since they are not team-specific.
+   */
+  _loadConfigFromTeam(team) {
+    const props = this.props;
+
+    // Resolve spreadsheet ID for this team
+    let mainSpreadsheetId = this._getSpreadsheetIdForDate(new Date(), team.projectName, team.configFileId, team.driveFolderId);
+    if (!mainSpreadsheetId) {
+      mainSpreadsheetId = null; // no fallback in multi-team mode
+    }
+
+    return {
+      projectName: team.projectName,
+      mainSpreadsheetId: mainSpreadsheetId,
+      engineerNames: team.engineerNames || [],
+      googleChatWebhookUrl: team.webhookUrl || '',
+      employeeAlertWebhookUrl: team.alertWebhookUrl || '',
+      testMode: props.getProperty('TEST_MODE') === 'true',
+      employeeChatIds: team.employeeChatIds || {},
+      holidays: team.holidays || [],
+      rowsToCheckAfterDate: parseInt(props.getProperty('ROWS_TO_CHECK_AFTER_DATE') || '5', 10),
+      sheetDataRange: props.getProperty('SHEET_DATA_RANGE') || 'A1:K150',
+      rssArticleCount: parseInt(props.getProperty('RSS_ARTICLE_COUNT') || '5', 10),
+      backlogUrl: team.backlogUrl || '',
+      backlogApiKey: team.backlogApiKey || '',
+      backlogProjectIds: team.backlogProjectIds || '',
+      backlogEngineerMapping: team.backlogEngineerMapping || {},
+    };
   }
 
   /**
@@ -113,8 +124,12 @@ class SheetsVerifier {
   }
   _getCurrentMonthSpreadsheetId() {
     try {
-      // Delegate to the existing function which accepts an optional date
-      return this._getSpreadsheetIdForDate(new Date());
+      return this._getSpreadsheetIdForDate(
+        new Date(),
+        this._teamConfig.projectName,
+        this._teamConfig.configFileId,
+        this._teamConfig.driveFolderId
+      );
     } catch (e) {
       Logger.log("Error in _getCurrentMonthSpreadsheetId: " + e);
       return null;
@@ -124,12 +139,15 @@ class SheetsVerifier {
    * Fetch spreadsheet ID from timesheet_config.json based on a specific date's year-month
    * Returns the sheet ID for the specified date's month or null if not found
    * @param {Date} targetDate - Optional date to get sheet ID for (defaults to current date)
+   * @param {string} [projectName] - Optional project name for multi-team key lookup (e.g. "Backend Team")
+   * @param {string} [overrideConfigFileId] - Optional config file ID (from master sheet)
+   * @param {string} [overrideFolderId] - Optional folder ID (from master sheet)
    */
-  _getSpreadsheetIdForDate(targetDate = null) {
+  _getSpreadsheetIdForDate(targetDate, projectName, overrideConfigFileId, overrideFolderId) {
     try {
       const props = PropertiesService.getScriptProperties();
-      const configFileId = props.getProperty("CONFIG_FILE_ID");
-      const destinationFolderId = props.getProperty("DESTINATION_FOLDER_ID");
+      const configFileId = overrideConfigFileId || props.getProperty("CONFIG_FILE_ID");
+      const destinationFolderId = overrideFolderId || props.getProperty("DESTINATION_FOLDER_ID");
 
       if (!configFileId && !destinationFolderId) {
         Logger.log("CONFIG_FILE_ID or DESTINATION_FOLDER_ID not configured");
@@ -140,7 +158,14 @@ class SheetsVerifier {
       let configFile = null;
       if (configFileId) {
         try {
-          configFile = DriveApp.getFileById(configFileId);
+          const candidate = DriveApp.getFileById(configFileId);
+          // Validate it's actually a JSON/text file, not a PDF or Google Doc
+          const mimeType = candidate.getMimeType();
+          if (mimeType === MimeType.PLAIN_TEXT || mimeType === 'application/json' || mimeType === 'text/plain') {
+            configFile = candidate;
+          } else {
+            Logger.log("Config File ID points to a " + mimeType + " file, not JSON. Searching by name instead.");
+          }
         } catch (e) {
           Logger.log("Could not find config file by ID, trying by name");
         }
@@ -151,8 +176,15 @@ class SheetsVerifier {
         try {
           const folder = DriveApp.getFolderById(destinationFolderId);
           const files = folder.getFilesByName("timesheet_config.json");
-          if (files.hasNext()) {
-            configFile = files.next();
+          while (files.hasNext()) {
+            const candidate = files.next();
+            const mimeType = candidate.getMimeType();
+            if (mimeType === MimeType.PLAIN_TEXT || mimeType === 'application/json' || mimeType === 'text/plain') {
+              configFile = candidate;
+              break;
+            } else {
+              Logger.log("Skipping non-JSON file in folder: " + candidate.getName() + " (type: " + mimeType + ")");
+            }
           }
         } catch (e) {
           Logger.log("Could not find config file in folder");
@@ -165,8 +197,15 @@ class SheetsVerifier {
           const files = DriveApp.getRootFolder().getFilesByName(
             "timesheet_config.json"
           );
-          if (files.hasNext()) {
-            configFile = files.next();
+          while (files.hasNext()) {
+            const candidate = files.next();
+            const mimeType = candidate.getMimeType();
+            if (mimeType === MimeType.PLAIN_TEXT || mimeType === 'application/json' || mimeType === 'text/plain') {
+              configFile = candidate;
+              break;
+            } else {
+              Logger.log("Skipping non-JSON file in root: " + candidate.getName() + " (type: " + mimeType + ")");
+            }
           }
         } catch (e) {
           Logger.log("Could not find config file in root folder");
@@ -178,6 +217,8 @@ class SheetsVerifier {
         return null;
       }
 
+      Logger.log("✓ Found config file: " + configFile.getName() + " (ID: " + configFile.getId() + ", MIME: " + configFile.getMimeType() + ")");
+
       // Read and parse config file
       const configContent = configFile.getBlob().getDataAsString();
       const config = JSON.parse(configContent);
@@ -186,10 +227,23 @@ class SheetsVerifier {
       const dateToUse = targetDate || new Date();
       const targetYear = dateToUse.getFullYear();
       const targetMonth = this._getMonthNameFromDate(dateToUse);
-      const configKey = targetYear + "-" + targetMonth;
 
-      // Get spreadsheet ID for target month
-      const spreadsheetId = config[configKey];
+      // Try project-prefixed key first (matches creator's format: "ProjectName_Year-Month")
+      // Then fall back to non-prefixed key for backward compatibility
+      let spreadsheetId = null;
+      if (projectName) {
+        const prefixedKey = projectName + "_" + targetYear + "-" + targetMonth;
+        spreadsheetId = config[prefixedKey];
+        if (spreadsheetId) {
+          Logger.log("✓ Found spreadsheet ID for " + prefixedKey + ": " + spreadsheetId);
+          return spreadsheetId;
+        }
+        Logger.log("No spreadsheet ID found for prefixed key: " + prefixedKey + ", trying non-prefixed...");
+      }
+
+      // Fall back to non-prefixed key (legacy format: "Year-Month")
+      const configKey = targetYear + "-" + targetMonth;
+      spreadsheetId = config[configKey];
 
       if (spreadsheetId) {
         Logger.log(
@@ -212,108 +266,7 @@ class SheetsVerifier {
     }
   }
 
-  /**
-   * Load configuration from Script Properties
-   */
-  _loadConfig() {
-    const props = PropertiesService.getScriptProperties();
-
-    // Parse engineer names
-    const engineerNamesStr =
-      props.getProperty("ENGINEER_NAMES") ||
-      "Jinu T J,Bismillakhan S,Midhun,Aravind,Akhil Mohan,Akash T K,Shinoj";
-    const engineerNames = engineerNamesStr.split(",").map((n) => n.trim());
-
-    // Parse employee chat IDs
-    let employeeChatIds = {};
-    try {
-      const chatIdsStr = props.getProperty("EMPLOYEE_CHAT_IDS");
-      if (chatIdsStr) {
-        employeeChatIds = JSON.parse(chatIdsStr);
-      }
-    } catch (e) {
-      Logger.log("Error parsing EMPLOYEE_CHAT_IDS: " + e);
-    }
-
-    // Parse holidays
-    let holidays = [];
-    try {
-      const holidaysStr = props.getProperty("HOLIDAYS");
-      if (holidaysStr) {
-        holidays = JSON.parse(holidaysStr);
-      } else {
-        // Default holidays for 2025
-        holidays = [
-          "2026-01-01",
-          "2026-01-26",
-          "2026-03-20",
-          "2026-04-03",
-          "2026-04-15",
-          "2026-05-01",
-          "2026-08-15",
-          "2026-08-25",
-          "2026-08-26",
-          "2026-09-04",
-          "2026-10-02",
-          "2026-10-20",
-          "2026-12-25",
-        ];
-      }
-    } catch (e) {
-      Logger.log("Error parsing HOLIDAYS: " + e);
-    }
-
-    // Parse Backlog engineer name mapping
-    let backlogEngineerMapping = {};
-    try {
-      const mappingStr = props.getProperty("BACKLOG_ENGINEER_MAPPING");
-      if (mappingStr) {
-        backlogEngineerMapping = JSON.parse(mappingStr);
-      }
-    } catch (e) {
-      Logger.log("Error parsing BACKLOG_ENGINEER_MAPPING: " + e);
-    }
-
-    // Get spreadsheet ID for current month from config file
-    // Fallback to MAIN_SPREADSHEET_ID if config file not available
-    let mainSpreadsheetId = this._getCurrentMonthSpreadsheetId();
-    if (!mainSpreadsheetId) {
-      mainSpreadsheetId = props.getProperty("MAIN_SPREADSHEET_ID");
-      if (mainSpreadsheetId) {
-        Logger.log(
-          "Using MAIN_SPREADSHEET_ID from Script Properties as fallback"
-        );
-      }
-    }
-
-    return {
-      mainSpreadsheetId: mainSpreadsheetId,
-      engineerNames: engineerNames,
-      googleChatWebhookUrl: props.getProperty("GOOGLE_CHAT_WEBHOOK_URL"),
-      employeeAlertWebhookUrl: props.getProperty("EMPLOYEE_ALERT_WEBHOOK_URL"),
-      testMode: props.getProperty("TEST_MODE") === "true",
-      employeeChatIds: employeeChatIds,
-      holidays: holidays,
-      rowsToCheckAfterDate: parseInt(
-        props.getProperty("ROWS_TO_CHECK_AFTER_DATE") || "5",
-        10
-      ),
-      sheetDataRange: props.getProperty("SHEET_DATA_RANGE") || "A1:K150",
-      rssArticleCount: parseInt(
-        props.getProperty("RSS_ARTICLE_COUNT") || "5",
-        10
-      ),
-      backlogUrl:
-        props.getProperty("BACKLOG_URL") || "https://ilabs.backlog.com",
-      backlogApiKey: props.getProperty("BACKLOG_API_KEY"),
-      backlogProjectIds: props.getProperty("BACKLOG_PROJECT_IDS") || "",
-      backlogEngineerMapping: backlogEngineerMapping,
-    };
-  }
-
-  /**
-   * Get current month sheet name (e.g., 'July', 'August')
-   */
+  /**\n   * Get current month sheet name (e.g., 'July', 'August')\n   */
   getCurrentMonthSheetName() {
     const now = new Date();
     const monthNames = [
@@ -1035,16 +988,21 @@ class SheetsVerifier {
     const lastWorkingDayYear = lastWorkingDayDate.getFullYear();
 
     // Fetch spreadsheet ID for the last working day's month
-    const spreadsheetId = this._getSpreadsheetIdForDate(lastWorkingDayDate);
+    const spreadsheetId = this._getSpreadsheetIdForDate(
+      lastWorkingDayDate,
+      this._teamConfig.projectName,
+      this._teamConfig.configFileId,
+      this._teamConfig.driveFolderId
+    );
     if (!spreadsheetId) {
       Logger.log(
         "Warning: Could not find spreadsheet ID for " +
+          this._teamConfig.projectName + '_' +
           lastWorkingDayYear +
           "-" +
           lastWorkingDayMonth +
           ", using fallback"
       );
-      // Use fallback from config
     }
 
     const effectiveSpreadsheetId =
@@ -1488,133 +1446,326 @@ class SheetsVerifier {
   }
 
   /**
-   * Main method to run the daily verification process
+   * Run verification for this team.
+   * Accepts a pre-fetched RSS post to avoid redundant fetches across teams.
+   *
+   * @param {string|null} linkedinPost - Pre-fetched RSS/LinkedIn post (shared across teams)
    */
-  runDailyVerification() {
-    Logger.log("Starting daily task verification...");
-    const today = Utilities.formatDate(
-      new Date(),
-      Session.getScriptTimeZone(),
-      "yyyy-MM-dd"
-    );
+  runTeamVerification(linkedinPost) {
+    const teamLabel = this.config.projectName || 'Unknown Team';
+    Logger.log('Starting verification for team: ' + teamLabel);
 
-    // Check if we should run verification today
+    // Get last working day
     const lastWorkingDayInfo = this.getLastWorkingDay();
     if (!lastWorkingDayInfo) {
-      Logger.log(
-        "No verification needed - today is weekend or no valid working day to check"
-      );
-      return [];
+      Logger.log('No verification needed for ' + teamLabel + ' - no valid working day to check');
+      return;
     }
     const lastWorkingDay = lastWorkingDayInfo.dateString;
 
     // Verify all employee sheets
     const results = this.verifyAllEmployees();
 
-    // Find employees who need to be reminded (no data or poor performance)
+    // Build summary
     const employeesToRemind = [];
-    let summaryMessage =
-      "📊 Daily Task Report Summary - " + lastWorkingDay + " \n";
+    let summaryMessage = '\uD83D\uDCCA *' + teamLabel + '* - Daily Task Report - ' + lastWorkingDay + '\n';
 
     for (let i = 0; i < results.length; i++) {
       const data = results[i];
       if (Array.isArray(data) && !data[1]) {
         employeesToRemind.push(data[0]);
-        summaryMessage += data[0] + "❌ Not Added \n";
+        summaryMessage += data[0] + '\u274C Not Added \n';
       } else {
-        summaryMessage += data + "\n";
+        summaryMessage += data + '\n';
       }
     }
 
-    // Get RSS feed articles
-    const rssAggregator = new CategorizedRSSFeedAggregator();
-    const category = rssAggregator.getCurrentDayCategory();
-    const articleCount = this.config.rssArticleCount;
-    const pickedArticles = rssAggregator.getRandomArticles(
-      articleCount,
-      category
-    );
-
-    if (pickedArticles && pickedArticles.length > 0) {
-      Logger.log("\n✅ Found " + pickedArticles.length + " articles:");
-      for (let i = 0; i < pickedArticles.length; i++) {
-        const article = pickedArticles[i];
-        Logger.log(i + 1 + ". " + article.title.substring(0, 80) + "...");
-        Logger.log("   🔗 " + article.link);
-      }
-    } else {
-      Logger.log("❌ No new articles found (all may have been sent before)");
-    }
-
-    const linkedinPost = rssAggregator.generateLinkedInPost(
-      articleCount,
-      category
-    );
-
-    // Get Backlog ticket counts
-    let backlogMessage = "";
+    // Get Backlog ticket counts (per-team, since Backlog config is team-specific)
+    let backlogMessage = '';
     if (this.config.backlogApiKey && this.config.backlogUrl) {
       const ticketCounts = this._countBacklogTicketsPerEngineer();
       backlogMessage = this._formatBacklogTicketCounts(ticketCounts);
       Logger.log(backlogMessage);
     }
 
-    // Send employee reminders if needed
+    // Send employee reminders
     if (employeesToRemind.length > 0) {
-      Logger.log("Sending reminders to: " + employeesToRemind.join(", "));
+      Logger.log('[' + teamLabel + '] Sending reminders to: ' + employeesToRemind.join(', '));
       this.sendEmployeeReminder(employeesToRemind);
     } else {
-      Logger.log(
-        "No employee reminders needed - all timesheets are properly submitted"
-      );
+      Logger.log('[' + teamLabel + '] All timesheets submitted');
     }
 
-    // Send LinkedIn post if available (include Backlog info)
-    if (linkedinPost) {
-      let postWithBacklog = linkedinPost;
+    // Send RSS + Backlog to employee alert webhook (RSS is shared, Backlog is team-specific)
+    if (this.config.employeeAlertWebhookUrl) {
+      let employeePost = '';
       if (backlogMessage) {
-        postWithBacklog = backlogMessage + "\n" + linkedinPost;
+        employeePost += backlogMessage + '\n';
       }
-      this.sendGoogleChatMessage(
-        postWithBacklog,
-        this.config.employeeAlertWebhookUrl
-      );
-    } else if (backlogMessage) {
-      // Send Backlog info even if no articles
-      this.sendGoogleChatMessage(
-        backlogMessage,
-        this.config.employeeAlertWebhookUrl
-      );
+      if (linkedinPost) {
+        employeePost += linkedinPost;
+      }
+      if (employeePost) {
+        this.sendGoogleChatMessage(employeePost, this.config.employeeAlertWebhookUrl);
+      }
     }
 
-    Logger.log("\n" + "=".repeat(50));
-    Logger.log("VERIFICATION SUMMARY");
-    Logger.log("=".repeat(50));
-    Logger.log(summaryMessage);
-    if (backlogMessage) {
-      Logger.log(backlogMessage);
-    }
-    Logger.log("=".repeat(50));
-
-    // Include Backlog info in summary message
+    // Send summary to manager webhook
     let finalSummaryMessage = summaryMessage;
     if (backlogMessage) {
       finalSummaryMessage += backlogMessage;
     }
     this.sendGoogleChatMessage(finalSummaryMessage);
 
-    return results;
+    Logger.log('[' + teamLabel + '] Verification complete');
   }
 }
 
+// ============================================================================
+// ENTRY POINTS & TEAM CONFIG
+// ============================================================================
+
 /**
- * Main function to run the verification
- * This can be called manually or set up as a time-driven trigger
+ * Read team configurations from the master "Teams Config" sheet.
+ * Reads all columns including verifier-specific ones (Alert Webhook, Chat IDs,
+ * Config File ID, Backlog settings, etc.).
+ * Only returns teams where "Enabled (Verify)" is "Yes".
+ *
+ * Requires Script Property: MASTER_SHEET_ID
+ *
+ * @returns {Array} Array of team config objects ready for SheetsVerifier constructor
+ */
+function readVerifierTeamConfigs() {
+  const props = PropertiesService.getScriptProperties();
+  const masterSheetId = props.getProperty('MASTER_SHEET_ID');
+
+  if (!masterSheetId) {
+    throw new Error('MASTER_SHEET_ID not configured. Set it in Script Properties.');
+  }
+
+  const ss = SpreadsheetApp.openById(masterSheetId);
+  const sheet = ss.getSheetByName('Teams Config');
+
+  if (!sheet) {
+    throw new Error("Sheet 'Teams Config' not found in master spreadsheet");
+  }
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) {
+    throw new Error('Master sheet must have header row and at least one data row');
+  }
+
+  // Fuzzy column header matching (same pattern as timesheet_creator.gs)
+  const headers = data[0].map(function(h) { return h.toString().trim(); });
+
+  function findCol(possibleNames) {
+    for (let i = 0; i < headers.length; i++) {
+      const header = headers[i].toLowerCase();
+      for (let j = 0; j < possibleNames.length; j++) {
+        if (header === possibleNames[j].toLowerCase()) {
+          return i;
+        }
+      }
+    }
+    return -1;
+  }
+
+  function parseList(value) {
+    if (!value) return [];
+    const str = value.toString().trim();
+    if (!str) return [];
+    return str.split(/[,\n]+/).map(function(item) { return item.trim(); }).filter(function(item) { return item.length > 0; });
+  }
+
+  function parseColonMap(value) {
+    // Parse "Name:Value, Name2:Value2" into {Name: Value, Name2: Value2}
+    if (!value) return {};
+    const str = value.toString().trim();
+    if (!str) return {};
+    const result = {};
+    var pairs = str.split(/[,\n]+/);
+    for (let i = 0; i < pairs.length; i++) {
+      const pair = pairs[i].trim();
+      const colonIdx = pair.indexOf(':');
+      if (colonIdx > 0) {
+        const key = pair.substring(0, colonIdx).trim();
+        const val = pair.substring(colonIdx + 1).trim();
+        if (key) result[key] = val;
+      }
+    }
+    return result;
+  }
+
+  const colMap = {
+    projectName:            findCol(['Project Name', 'ProjectName', 'Project']),
+    teamMembers:            findCol(['Team Members', 'TeamMembers', 'Members', 'Employees']),
+    driveFolderId:          findCol(['Drive Folder ID', 'DriveFolderID', 'Folder ID', 'FolderID']),
+    webhookUrl:             findCol(['Webhook URL', 'WebhookURL', 'Webhook', 'Chat Webhook']),
+    employeeEmails:         findCol(['Employee Emails', 'EmployeeEmails', 'Emails']),
+    alertWebhookUrl:        findCol(['Alert Webhook URL', 'AlertWebhookURL', 'Alert Webhook', 'Employee Alert Webhook']),
+    employeeChatIds:        findCol(['Employee Chat IDs', 'EmployeeChatIDs', 'Chat IDs']),
+    configFileId:           findCol(['Config File ID', 'ConfigFileID', 'Config File']),
+    enabledCreate:          findCol(['Enabled (Create)', 'Enabled Create']),
+    enabledVerify:          findCol(['Enabled (Verify)', 'Enabled Verify']),
+    statusOptions:          findCol(['Status Options', 'StatusOptions']),
+    activityOptions:        findCol(['Activity Options', 'ActivityOptions']),
+    holidayDates:           findCol(['Holiday Dates', 'HolidayDates', 'Holidays']),
+    backlogUrl:             findCol(['Backlog URL', 'BacklogURL']),
+    backlogApiKey:          findCol(['Backlog API Key', 'BacklogAPIKey', 'Backlog Key']),
+    backlogProjectIds:      findCol(['Backlog Project IDs', 'BacklogProjectIDs']),
+    backlogEngineerMapping: findCol(['Backlog Engineer Mapping', 'BacklogEngineerMapping'])
+  };
+
+  // Validate required columns
+  if (colMap.projectName === -1) {
+    throw new Error("Required column 'Project Name' not found in master sheet");
+  }
+  if (colMap.teamMembers === -1) {
+    throw new Error("Required column 'Team Members' not found in master sheet");
+  }
+
+  const teams = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+
+    // Skip empty rows
+    if (!row[colMap.projectName]) continue;
+
+    // Check Enabled (Verify) column — skip unless "Yes"
+    if (colMap.enabledVerify !== -1) {
+      const val = row[colMap.enabledVerify].toString().trim().toLowerCase();
+      if (val !== 'yes' && val !== 'true' && val !== '1') {
+        Logger.log('Skipping team (Verify disabled): ' + row[colMap.projectName]);
+        continue;
+      }
+    }
+
+    const team = {
+      projectName:           row[colMap.projectName].toString().trim(),
+      engineerNames:         parseList(row[colMap.teamMembers]),
+      driveFolderId:         colMap.driveFolderId !== -1 ? row[colMap.driveFolderId].toString().trim() : '',
+      webhookUrl:            colMap.webhookUrl !== -1 ? row[colMap.webhookUrl].toString().trim() : '',
+      alertWebhookUrl:       colMap.alertWebhookUrl !== -1 ? row[colMap.alertWebhookUrl].toString().trim() : '',
+      employeeChatIds:       colMap.employeeChatIds !== -1 ? parseColonMap(row[colMap.employeeChatIds]) : {},
+      configFileId:          colMap.configFileId !== -1 ? row[colMap.configFileId].toString().trim() : '',
+      holidays:              colMap.holidayDates !== -1 ? parseList(row[colMap.holidayDates]) : [],
+      backlogUrl:            colMap.backlogUrl !== -1 ? row[colMap.backlogUrl].toString().trim() : '',
+      backlogApiKey:         colMap.backlogApiKey !== -1 ? row[colMap.backlogApiKey].toString().trim() : '',
+      backlogProjectIds:     colMap.backlogProjectIds !== -1 ? row[colMap.backlogProjectIds].toString().trim() : '',
+      backlogEngineerMapping: colMap.backlogEngineerMapping !== -1 ? parseColonMap(row[colMap.backlogEngineerMapping]) : {},
+    };
+
+    // Validate team has engineers
+    if (team.engineerNames.length === 0) {
+      Logger.log('WARNING: Team "' + team.projectName + '" has no team members. Skipping.');
+      continue;
+    }
+
+    teams.push(team);
+  }
+
+  Logger.log('Loaded ' + teams.length + ' team configurations for verification from master sheet');
+  return teams;
+}
+
+/**
+ * Daily verification orchestrator.
+ * Reads all enabled teams from the master sheet and runs verification for each.
+ *
+ * Requires Script Property: MASTER_SHEET_ID
+ * Optional Script Properties: TEST_MODE, RSS_ARTICLE_COUNT, ROWS_TO_CHECK_AFTER_DATE, SHEET_DATA_RANGE
+ *
+ * Set this as your time-driven trigger.
  */
 function runDailyVerification() {
-  const verifier = new SheetsVerifier();
-  const results = verifier.runDailyVerification();
-  return results;
+  const startTime = new Date().getTime();
+  const MAX_EXECUTION_MS = 5 * 60 * 1000; // 5 minutes (leave 1 min buffer from Apps Script 6-min limit)
+
+  Logger.log('='.repeat(60));
+  Logger.log('MULTI-TEAM VERIFICATION - Starting at ' + new Date().toISOString());
+  Logger.log('='.repeat(60));
+
+  // Check if today is a weekend first (global check, done once)
+  const today = new Date();
+  const currentDay = today.getDay();
+  if (currentDay === 0 || currentDay === 6) {
+    Logger.log('No verification needed - today is a weekend');
+    return;
+  }
+
+  // Read team configurations from master sheet
+  let teams;
+  try {
+    teams = readVerifierTeamConfigs();
+  } catch (e) {
+    Logger.log('FATAL: Could not read master sheet: ' + e);
+    return;
+  }
+
+  if (teams.length === 0) {
+    Logger.log('No teams enabled for verification.');
+    return;
+  }
+
+  // Fetch RSS feed once (shared across all teams, not team-specific)
+  let linkedinPost = null;
+  try {
+    const rssAggregator = new CategorizedRSSFeedAggregator();
+    const category = rssAggregator.getCurrentDayCategory();
+    const props = PropertiesService.getScriptProperties();
+    const articleCount = parseInt(props.getProperty('RSS_ARTICLE_COUNT') || '5', 10);
+    linkedinPost = rssAggregator.generateLinkedInPost(articleCount, category);
+  } catch (e) {
+    Logger.log('Warning: RSS feed fetch failed: ' + e);
+  }
+
+  // Run verification for each team
+  const teamResults = [];
+  for (let i = 0; i < teams.length; i++) {
+    // Check execution time guard
+    const elapsed = new Date().getTime() - startTime;
+    if (elapsed > MAX_EXECUTION_MS) {
+      Logger.log('⚠ Approaching execution time limit (' + Math.round(elapsed / 1000) + 's elapsed). Stopping.');
+      Logger.log('Skipped teams: ' + teams.slice(i).map(function(t) { return t.projectName; }).join(', '));
+      break;
+    }
+
+    const team = teams[i];
+    Logger.log('\n' + '-'.repeat(50));
+    Logger.log('Verifying team: ' + team.projectName + ' (' + team.engineerNames.length + ' engineers)');
+    Logger.log('-'.repeat(50));
+
+    try {
+      const verifier = new SheetsVerifier(team);
+
+      // Check if today is a holiday for THIS team specifically
+      if (verifier.isHoliday(today)) {
+        Logger.log('Skipping ' + team.projectName + ' - today is a team holiday');
+        teamResults.push({ team: team.projectName, status: 'skipped (holiday)' });
+        continue;
+      }
+
+      // Run daily verification for this team, passing pre-fetched RSS post
+      verifier.runTeamVerification(linkedinPost);
+      teamResults.push({ team: team.projectName, status: 'success' });
+
+    } catch (e) {
+      Logger.log('ERROR verifying team ' + team.projectName + ': ' + e);
+      teamResults.push({ team: team.projectName, status: 'error: ' + e.message });
+    }
+  }
+
+  // Summary
+  const totalElapsed = Math.round((new Date().getTime() - startTime) / 1000);
+  Logger.log('\n' + '='.repeat(60));
+  Logger.log('MULTI-TEAM VERIFICATION SUMMARY (' + totalElapsed + 's)');
+  Logger.log('='.repeat(60));
+  for (let i = 0; i < teamResults.length; i++) {
+    const r = teamResults[i];
+    const icon = r.status === 'success' ? '✅' : (r.status.indexOf('error') !== -1 ? '❌' : '⏭');
+    Logger.log(icon + ' ' + r.team + ': ' + r.status);
+  }
+  Logger.log('='.repeat(60));
 }
 
 /**
@@ -1889,460 +2040,86 @@ class CategorizedRSSFeedAggregator {
   }
 }
 
-/**
- * ============================================================================
- * SIMPLIFIED CONFIGURATION FUNCTIONS
- * ============================================================================
- * Use these functions to easily configure your timesheet verifier
- */
+// ============================================================================
+// CONFIGURATION HELPERS
+// ============================================================================
 
 /**
- * Set engineer names (simplified - just pass an array)
- * Example: setEngineerNames(['John Doe', 'Jane Smith', 'Bob Johnson'])
- */
-function setEngineerNames(engineerNames) {
-  if (!Array.isArray(engineerNames)) {
-    Logger.log("ERROR: engineerNames must be an array");
-    Logger.log('Example: setEngineerNames(["John Doe", "Jane Smith"])');
-    return false;
-  }
-
-  const props = PropertiesService.getScriptProperties();
-  props.setProperty("ENGINEER_NAMES", engineerNames.join(","));
-  Logger.log("✓ Engineer names set: " + engineerNames.join(", "));
-  return true;
-}
-
-/**
- * Add or update a single engineer with their chat ID
- * Example: addEngineer('John Doe', '123456789012345678901')
+ * Set up the verifier.
+ * Only one script property needed: MASTER_SHEET_ID.
+ * All team-specific config comes from the master "Teams Config" sheet.
  *
- * @param {string} engineerName - The engineer's name (must match sheet name exactly)
- * @param {string} chatId - Google Chat user ID (optional, can be null)
+ * @param {string} masterSheetId - The spreadsheet ID of the master config sheet
  */
-function addEngineer(engineerName, chatId) {
-  if (!engineerName) {
-    Logger.log("ERROR: engineerName is required");
+function setupMultiTeam(masterSheetId) {
+  if (!masterSheetId) {
+    Logger.log('ERROR: masterSheetId is required');
+    Logger.log('Example: setupMultiTeam("1ABCdef.....")');
     return false;
   }
 
   const props = PropertiesService.getScriptProperties();
+  props.setProperty('MASTER_SHEET_ID', masterSheetId);
 
-  // Get current engineer names
-  const currentNamesStr = props.getProperty("ENGINEER_NAMES") || "";
-  const currentNames = currentNamesStr
-    ? currentNamesStr.split(",").map((n) => n.trim())
-    : [];
-
-  // Add engineer name if not already present
-  if (currentNames.indexOf(engineerName) === -1) {
-    currentNames.push(engineerName);
-    props.setProperty("ENGINEER_NAMES", currentNames.join(","));
-    Logger.log("✓ Added engineer: " + engineerName);
-  } else {
-    Logger.log("ℹ Engineer already exists: " + engineerName);
-  }
-
-  // Update chat ID if provided
-  if (chatId) {
-    let chatIds = {};
-    try {
-      const chatIdsStr = props.getProperty("EMPLOYEE_CHAT_IDS");
-      if (chatIdsStr) {
-        chatIds = JSON.parse(chatIdsStr);
-      }
-    } catch (e) {
-      Logger.log("Warning: Could not parse existing chat IDs");
-    }
-
-    chatIds[engineerName] = chatId;
-    props.setProperty("EMPLOYEE_CHAT_IDS", JSON.stringify(chatIds));
-    Logger.log("✓ Set chat ID for " + engineerName + ": " + chatId);
-  }
+  Logger.log('✓ MASTER_SHEET_ID set to: ' + masterSheetId);
+  Logger.log('');
+  Logger.log('Next steps:');
+  Logger.log('  1. Run viewMultiTeamConfiguration() to verify your team configs');
+  Logger.log('  2. Set your time-driven trigger to: runDailyVerification');
+  Logger.log('  3. Optional: Set TEST_MODE to "true" for a dry run first');
 
   return true;
 }
 
 /**
- * Remove an engineer from the list
- * Example: removeEngineer('John Doe')
+ * View the multi-team configuration as read from the master sheet.
+ * Shows all teams, their enabled/disabled status, and their configuration.
+ * Run this to verify the master sheet is set up correctly before switching triggers.
  */
-function removeEngineer(engineerName) {
-  if (!engineerName) {
-    Logger.log("ERROR: engineerName is required");
-    return false;
-  }
-
+function viewMultiTeamConfiguration() {
   const props = PropertiesService.getScriptProperties();
+  const masterSheetId = props.getProperty('MASTER_SHEET_ID');
 
-  // Remove from engineer names
-  const currentNamesStr = props.getProperty("ENGINEER_NAMES") || "";
-  const currentNames = currentNamesStr
-    ? currentNamesStr.split(",").map((n) => n.trim())
-    : [];
-  const index = currentNames.indexOf(engineerName);
+  Logger.log('='.repeat(60));
+  Logger.log('MULTI-TEAM CONFIGURATION');
+  Logger.log('='.repeat(60));
 
-  if (index !== -1) {
-    currentNames.splice(index, 1);
-    props.setProperty("ENGINEER_NAMES", currentNames.join(","));
-    Logger.log("✓ Removed engineer: " + engineerName);
-  } else {
-    Logger.log("ℹ Engineer not found: " + engineerName);
+  if (!masterSheetId) {
+    Logger.log('MASTER_SHEET_ID: NOT SET');
+    Logger.log('Run setupMultiTeam("your_spreadsheet_id") first.');
+    return;
   }
 
-  // Remove from chat IDs
+  Logger.log('MASTER_SHEET_ID: ' + masterSheetId);
+  Logger.log('TEST_MODE: ' + (props.getProperty('TEST_MODE') || 'false'));
+  Logger.log('ROWS_TO_CHECK_AFTER_DATE: ' + (props.getProperty('ROWS_TO_CHECK_AFTER_DATE') || '5'));
+  Logger.log('SHEET_DATA_RANGE: ' + (props.getProperty('SHEET_DATA_RANGE') || 'A1:K150'));
+  Logger.log('RSS_ARTICLE_COUNT: ' + (props.getProperty('RSS_ARTICLE_COUNT') || '5'));
+
   try {
-    const chatIdsStr = props.getProperty("EMPLOYEE_CHAT_IDS");
-    if (chatIdsStr) {
-      const chatIds = JSON.parse(chatIdsStr);
-      if (chatIds[engineerName]) {
-        delete chatIds[engineerName];
-        props.setProperty("EMPLOYEE_CHAT_IDS", JSON.stringify(chatIds));
-        Logger.log("✓ Removed chat ID for " + engineerName);
-      }
+    const teams = readVerifierTeamConfigs();
+
+    Logger.log('\n' + teams.length + ' team(s) enabled for verification:\n');
+
+    for (let i = 0; i < teams.length; i++) {
+      const team = teams[i];
+      Logger.log((i + 1) + '. ' + team.projectName);
+      Logger.log('   Engineers: ' + team.engineerNames.join(', '));
+      Logger.log('   Drive Folder ID: ' + (team.driveFolderId || 'NOT SET'));
+      Logger.log('   Config File ID: ' + (team.configFileId || 'NOT SET'));
+      Logger.log('   Manager Webhook: ' + (team.webhookUrl ? 'SET' : 'NOT SET'));
+      Logger.log('   Employee Alert Webhook: ' + (team.alertWebhookUrl ? 'SET' : 'NOT SET'));
+      Logger.log('   Chat IDs: ' + Object.keys(team.employeeChatIds).length + ' configured');
+      Logger.log('   Holidays: ' + team.holidays.length + ' dates');
+      Logger.log('   Backlog URL: ' + (team.backlogUrl || 'NOT SET'));
+      Logger.log('   Backlog API Key: ' + (team.backlogApiKey ? 'SET' : 'NOT SET'));
+      Logger.log('   Backlog Project IDs: ' + (team.backlogProjectIds || 'NOT SET'));
+      Logger.log('   Backlog Engineer Mapping: ' + Object.keys(team.backlogEngineerMapping).length + ' mappings');
+      Logger.log('');
     }
   } catch (e) {
-    Logger.log("Warning: Could not update chat IDs");
+    Logger.log('ERROR reading master sheet: ' + e);
   }
 
-  return true;
-}
-
-/**
- * Set chat ID for an existing engineer
- * Example: setEngineerChatId('John Doe', '123456789012345678901')
- */
-function setEngineerChatId(engineerName, chatId) {
-  if (!engineerName || !chatId) {
-    Logger.log("ERROR: Both engineerName and chatId are required");
-    return false;
-  }
-
-  const props = PropertiesService.getScriptProperties();
-
-  let chatIds = {};
-  try {
-    const chatIdsStr = props.getProperty("EMPLOYEE_CHAT_IDS");
-    if (chatIdsStr) {
-      chatIds = JSON.parse(chatIdsStr);
-    }
-  } catch (e) {
-    Logger.log("Warning: Could not parse existing chat IDs");
-  }
-
-  chatIds[engineerName] = chatId;
-  props.setProperty("EMPLOYEE_CHAT_IDS", JSON.stringify(chatIds));
-  Logger.log("✓ Set chat ID for " + engineerName + ": " + chatId);
-  return true;
-}
-
-/**
- * View current configuration
- * Shows all engineers and their chat IDs
- */
-function viewConfiguration() {
-  const props = PropertiesService.getScriptProperties();
-
-  Logger.log("=".repeat(60));
-  Logger.log("CURRENT CONFIGURATION");
-  Logger.log("=".repeat(60));
-
-  // Main settings
-  Logger.log("\nMain Settings:");
-  Logger.log(
-    "  CONFIG_FILE_ID: " + (props.getProperty("CONFIG_FILE_ID") || "NOT SET")
-  );
-  Logger.log(
-    "  DESTINATION_FOLDER_ID: " +
-      (props.getProperty("DESTINATION_FOLDER_ID") || "NOT SET")
-  );
-  Logger.log(
-    "  MAIN_SPREADSHEET_ID (fallback): " +
-      (props.getProperty("MAIN_SPREADSHEET_ID") || "NOT SET")
-  );
-
-  // Show which spreadsheet ID is actually being used
-  try {
-    const verifier = new SheetsVerifier();
-    const currentSpreadsheetId = verifier.config.mainSpreadsheetId;
-    if (currentSpreadsheetId) {
-      Logger.log(
-        "  ✓ Current Spreadsheet ID (from config file): " + currentSpreadsheetId
-      );
-    } else {
-      Logger.log(
-        "  ⚠ No spreadsheet ID found (check config file or MAIN_SPREADSHEET_ID)"
-      );
-    }
-  } catch (e) {
-    Logger.log("  ⚠ Could not determine current spreadsheet ID: " + e);
-  }
-
-  Logger.log(
-    "  GOOGLE_CHAT_WEBHOOK_URL: " +
-      (props.getProperty("GOOGLE_CHAT_WEBHOOK_URL") ? "SET" : "NOT SET")
-  );
-  Logger.log(
-    "  EMPLOYEE_ALERT_WEBHOOK_URL: " +
-      (props.getProperty("EMPLOYEE_ALERT_WEBHOOK_URL") ? "SET" : "NOT SET")
-  );
-  Logger.log("  TEST_MODE: " + (props.getProperty("TEST_MODE") || "false"));
-  Logger.log(
-    "  ROWS_TO_CHECK_AFTER_DATE: " +
-      (props.getProperty("ROWS_TO_CHECK_AFTER_DATE") || "5")
-  );
-  Logger.log(
-    "  SHEET_DATA_RANGE: " +
-      (props.getProperty("SHEET_DATA_RANGE") || "A1:K150")
-  );
-  Logger.log(
-    "  RSS_ARTICLE_COUNT: " + (props.getProperty("RSS_ARTICLE_COUNT") || "5")
-  );
-
-  // Backlog settings
-  Logger.log("\nBacklog Settings:");
-  Logger.log(
-    "  BACKLOG_URL: " + (props.getProperty("BACKLOG_URL") || "NOT SET")
-  );
-  Logger.log(
-    "  BACKLOG_API_KEY: " +
-      (props.getProperty("BACKLOG_API_KEY") ? "SET" : "NOT SET")
-  );
-  Logger.log(
-    "  BACKLOG_PROJECT_IDS: " +
-      (props.getProperty("BACKLOG_PROJECT_IDS") || "NOT SET")
-  );
-  try {
-    const mappingStr = props.getProperty("BACKLOG_ENGINEER_MAPPING");
-    if (mappingStr) {
-      const mapping = JSON.parse(mappingStr);
-      Logger.log(
-        "  BACKLOG_ENGINEER_MAPPING: " +
-          Object.keys(mapping).length +
-          " mappings"
-      );
-    } else {
-      Logger.log("  BACKLOG_ENGINEER_MAPPING: NOT SET");
-    }
-  } catch (e) {
-    Logger.log("  BACKLOG_ENGINEER_MAPPING: Error reading");
-  }
-
-  // Engineers
-  Logger.log("\nEngineers:");
-  const engineerNamesStr = props.getProperty("ENGINEER_NAMES") || "";
-  const engineerNames = engineerNamesStr
-    ? engineerNamesStr.split(",").map((n) => n.trim())
-    : [];
-
-  if (engineerNames.length === 0) {
-    Logger.log("  No engineers configured");
-  } else {
-    // Get chat IDs
-    let chatIds = {};
-    try {
-      const chatIdsStr = props.getProperty("EMPLOYEE_CHAT_IDS");
-      if (chatIdsStr) {
-        chatIds = JSON.parse(chatIdsStr);
-      }
-    } catch (e) {
-      // Ignore
-    }
-
-    for (let i = 0; i < engineerNames.length; i++) {
-      const name = engineerNames[i];
-      const chatId = chatIds[name] || "NOT SET";
-      Logger.log("  " + (i + 1) + ". " + name + " (Chat ID: " + chatId + ")");
-    }
-  }
-
-  // Holidays
-  Logger.log("\nHolidays:");
-  try {
-    const holidaysStr = props.getProperty("HOLIDAYS");
-    if (holidaysStr) {
-      const holidays = JSON.parse(holidaysStr);
-      Logger.log("  " + holidays.length + " holidays configured");
-      for (let i = 0; i < holidays.length; i++) {
-        Logger.log("    - " + holidays[i]);
-      }
-    } else {
-      Logger.log("  No holidays configured");
-    }
-  } catch (e) {
-    Logger.log("  Error reading holidays");
-  }
-
-  Logger.log("\n" + "=".repeat(60));
-}
-
-/**
- * Ultra-simple setup - configure engineers from a single string
- * Format: "name1|chat_id1,name2|chat_id2,name3" (chat ID optional)
- * Example: setupEngineersFromString("John Doe|123456789012345678901,Jane Smith|987654321098765432109,Bob Johnson")
- *
- * This is the simplest format - just one string, easy to copy/paste!
- */
-function setupEngineersFromString(engineersString) {
-  if (!engineersString || typeof engineersString !== "string") {
-    Logger.log("ERROR: engineersString must be a string");
-    Logger.log(
-      'Example: setupEngineersFromString("John Doe|123456789,Jane Smith|987654321")'
-    );
-    return false;
-  }
-
-  const engineers = [];
-  const parts = engineersString.split(",");
-
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i].trim();
-    if (!part) continue;
-
-    const pipeIndex = part.indexOf("|");
-    if (pipeIndex !== -1) {
-      // Has chat ID
-      const name = part.substring(0, pipeIndex).trim();
-      const chatId = part.substring(pipeIndex + 1).trim();
-      engineers.push({ name: name, chatId: chatId });
-    } else {
-      // No chat ID
-      engineers.push({ name: part });
-    }
-  }
-
-  if (engineers.length === 0) {
-    Logger.log("ERROR: No engineers found in string");
-    return false;
-  }
-
-  return quickSetupEngineers(engineers);
-}
-
-/**
- * Quick setup - configure multiple engineers at once
- * Example: quickSetupEngineers([
- *   {name: 'John Doe', chatId: '123456789012345678901'},
- *   {name: 'Jane Smith', chatId: '987654321098765432109'},
- *   {name: 'Bob Johnson'}  // No chat ID
- * ])
- */
-function quickSetupEngineers(engineers) {
-  if (!Array.isArray(engineers)) {
-    Logger.log("ERROR: engineers must be an array");
-    Logger.log(
-      'Example: quickSetupEngineers([{name: "John Doe", chatId: "123..."}])'
-    );
-    return false;
-  }
-
-  const names = [];
-  const chatIds = {};
-
-  for (let i = 0; i < engineers.length; i++) {
-    const eng = engineers[i];
-    if (!eng.name) {
-      Logger.log('ERROR: Each engineer must have a "name" property');
-      return false;
-    }
-
-    names.push(eng.name);
-    if (eng.chatId) {
-      chatIds[eng.name] = eng.chatId;
-    }
-  }
-
-  const props = PropertiesService.getScriptProperties();
-  props.setProperty("ENGINEER_NAMES", names.join(","));
-  props.setProperty("EMPLOYEE_CHAT_IDS", JSON.stringify(chatIds));
-
-  Logger.log("✓ Configured " + names.length + " engineers");
-  Logger.log("  Names: " + names.join(", "));
-  Logger.log(
-    "  Chat IDs set for: " + Object.keys(chatIds).length + " engineers"
-  );
-
-  return true;
-}
-
-/**
- * Setup function to configure Script Properties
- * Run this once to set up your configuration
- *
- * For easier setup, use the helper functions above instead:
- * - setEngineerNames(['Name1', 'Name2'])
- * - addEngineer('Name', 'ChatID')
- * - quickSetupEngineers([{name: 'Name', chatId: 'ID'}])
- */
-function setupConfiguration() {
-  const props = PropertiesService.getScriptProperties();
-
-  // Set your configuration values here
-  // Note: The script will automatically fetch spreadsheet ID from timesheet_config.json
-  // based on current year-month. Set these only if you want to use a fallback:
-  props.setProperty("MAIN_SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE"); // Fallback only
-  props.setProperty("CONFIG_FILE_ID", ""); // Optional: ID of timesheet_config.json file
-  props.setProperty("DESTINATION_FOLDER_ID", ""); // Optional: Folder ID where config file is stored
-  props.setProperty("GOOGLE_CHAT_WEBHOOK_URL", "YOUR_WEBHOOK_URL");
-  props.setProperty("EMPLOYEE_ALERT_WEBHOOK_URL", "YOUR_ALERT_WEBHOOK_URL");
-  props.setProperty("TEST_MODE", "false");
-  props.setProperty("ROWS_TO_CHECK_AFTER_DATE", "5");
-  props.setProperty("SHEET_DATA_RANGE", "A1:K150");
-  props.setProperty("RSS_ARTICLE_COUNT", "5");
-
-  // Backlog configuration (optional)
-  props.setProperty("BACKLOG_URL", "https://ilabs.backlog.com");
-  props.setProperty("BACKLOG_API_KEY", "YOUR_BACKLOG_API_KEY");
-  props.setProperty("BACKLOG_PROJECT_IDS", "PROJECT_ID_1,PROJECT_ID_2"); // Comma-separated
-
-  // Backlog engineer name mapping (optional - maps engineer names to Backlog assignee names)
-  // Example: If engineer is "Bismillakhan S" but Backlog shows "Bismillakhan", add mapping
-  const backlogMapping = {
-    // "Bismillakhan S": "Bismillakhan",
-    // "Jinu T J": "Jinu",
-  };
-  props.setProperty("BACKLOG_ENGINEER_MAPPING", JSON.stringify(backlogMapping));
-
-  // Use simplified functions for engineers
-  Logger.log("Setting up engineers...");
-  Logger.log(
-    'You can also use: quickSetupEngineers([{name: "Name", chatId: "ID"}])'
-  );
-
-  // Example: Set engineers using the simplified function
-  setEngineerNames([
-    "Jinu T J",
-    "Bismillakhan S",
-    "Midhun",
-    "Aravind",
-    "Akhil Mohan",
-    "Akash T K",
-    "Shinoj",
-  ]);
-
-  // Example: Set chat IDs using the simplified function
-  addEngineer("Bismillakhan S", "115773514265520053097");
-  addEngineer("Jinu T J", "115142352767738659510");
-  addEngineer("Midhun", "108660074852905944786");
-  addEngineer("Aravind", "107574045682955308493");
-  addEngineer("Akhil Mohan", "104052864034579334603");
-  addEngineer("Akash T K", "112652200937440721836");
-  addEngineer("Shinoj", "117004017244973974527");
-
-  // Set holidays as JSON array
-  const holidays = [
-    "2025-04-10",
-    "2025-05-01",
-    "2025-08-03",
-    "2025-08-15",
-    "2025-09-14",
-    "2025-10-01",
-    "2025-10-02",
-    "2025-10-20",
-    "2025-12-25",
-  ];
-  props.setProperty("HOLIDAYS", JSON.stringify(holidays));
-
-  Logger.log("\n✓ Configuration set up successfully!");
-  Logger.log("Run viewConfiguration() to see your current settings.");
+  Logger.log('='.repeat(60));
 }
